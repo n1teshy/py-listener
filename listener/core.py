@@ -91,7 +91,7 @@ class Listener:
     def __init__(
         self,
         speech_handler: Optional[Callable[[str], Any]] = None,
-        on_istenining_start: Optional[Callable] = None,
+        on_listenining_start: Optional[Callable] = None,
         sampling_rate: int = 16000,
         time_window: int = 2,
         no_channels: int = 1,
@@ -122,7 +122,7 @@ class Listener:
             Function to be called with the text extracted from the audio with
             human voice.
 
-        on_istenining_start: Callable, optional
+        on_listenining_start: Callable, optional
             Function to call when `Listener` starts listening.
 
         sampling_rate : int, optional
@@ -196,7 +196,7 @@ class Listener:
         if use_fp16 is None:
             use_fp16 = device.type.lower() not in ("cpu", "mps")
         self.speech_handler = speech_handler
-        self.on_istenining_start = on_istenining_start
+        self.on_listenining_start = on_listenining_start
         self.sampling_rate = sampling_rate
         self.time_window = time_window
         self.no_channels = no_channels
@@ -220,6 +220,9 @@ class Listener:
             download_whisper_model(self.whisper_size)
 
     def listen(self):
+        """
+        Starts listening from a separate thread.
+        """
         self.stream = sd.InputStream(
             samplerate=self.sampling_rate,
             blocksize=self.sampling_rate * self.time_window,
@@ -261,8 +264,8 @@ class Listener:
 
         self._stop.clear()
         self.stream.start()
-        if self.on_istenining_start is not None:
-            self.on_istenining_start()
+        if self.on_listenining_start is not None:
+            self.on_listenining_start()
 
     def _audio_cb(self, in_data: np.ndarray, *args):
         if self._stop.is_set():
@@ -284,6 +287,9 @@ class Listener:
             self.voice_chunks = []
 
     def stop(self):
+        """
+        Stops listening.
+        """
         self._stop.set()
         self.voice_chunks = []
         # free the whisper model from the reference held by
