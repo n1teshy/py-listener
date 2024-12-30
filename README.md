@@ -66,6 +66,9 @@ It starts collecting audio data after instantation into `n` second chunks, `n` i
 
 - `voice_to_speech`: a function used to convert human voice to text, [whisper](https://github.com/openai/whisper) is used by default to do this, `voice_to_speech(list<numpy.ndarray>)`.
 
+- `whisper_size`: a size for the underlying whisper model, options: `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`,
+`medium`, `medium.en`, `large`, `turbo`.
+
 - `use_fp16`: a boolean flag indicating if the the voice detection and speech-to-text models should use [half precision](https://en.wikipedia.org/wiki/Half-precision_floating-point_format) arithmetic to save memory and reduce latency, the default is `True` if CUDA is available, it has no effect on CPUs at the time of this writing so it's set to `False` by default on CPU environments.
 
 - `en_only`: a flag indicating only english language is going to be used in the collected audio, this is used to determine the best whisper model to use to convert speech to text.
