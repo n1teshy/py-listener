@@ -8,6 +8,7 @@ from typing import Any, Callable, List, Literal, Optional, Union
 import numpy as np
 import sounddevice as sd
 import torch
+import whisper
 
 from listener.utils import whisper_source
 
@@ -54,6 +55,7 @@ def download_whisper_model(size: str):
     url = whisper_source[size]
     default = os.path.join(os.path.expanduser("~"), ".cache")
     root = os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
+    os.makedirs(root, exist_ok=True)
 
     expected_sha256 = url.split("/")[-2]
     model_file = os.path.join(root, os.path.basename(url))
@@ -91,7 +93,7 @@ class Listener:
     def __init__(
         self,
         speech_handler: Optional[Callable[[str], Any]] = None,
-        on_listenining_start: Optional[Callable] = None,
+        on_listening_start: Optional[Callable] = None,
         sampling_rate: int = 16000,
         time_window: int = 2,
         no_channels: int = 1,
@@ -102,6 +104,7 @@ class Listener:
         whisper_size: Union[WhisperSize, Literal["auto"]] = "auto",
         use_fp16: Optional[bool] = None,
         en_only: bool = False,
+        show_model_download: bool = True,
         device: Optional[Union[str, torch.device]] = None,
     ):
         """
@@ -122,7 +125,7 @@ class Listener:
             Function to be called with the text extracted from the audio with
             human voice.
 
-        on_listenining_start: Callable, optional
+        on_listening_start: Callable, optional
             Function to call when `Listener` starts listening.
 
         sampling_rate : int, optional
@@ -179,6 +182,10 @@ class Listener:
             `whisper_size` argument is not provided, set to `True` if the
             speaker is only going to speak english (default: `False`).
 
+        show_model_download: bool, optional
+            This controls if a progress bar is displayed when dowloading the
+            necessary models (default: `True`).
+
         device: Union[str, torch.device], optional
             The device to run necessary models on, e.g. cpu, cuda etc
             (default: `"cuda"` if available, `"cpu"` otherwise).
@@ -196,7 +203,7 @@ class Listener:
         if use_fp16 is None:
             use_fp16 = device.type.lower() not in ("cpu", "mps")
         self.speech_handler = speech_handler
-        self.on_listenining_start = on_listenining_start
+        self.on_listening_start = on_listening_start
         self.sampling_rate = sampling_rate
         self.time_window = time_window
         self.no_channels = no_channels
@@ -217,7 +224,10 @@ class Listener:
         # openai-whisper shows a progress bar when it downloads a model
         # I don't like the bar messing up my terminal, this is a temporary fix
         if self.speech_handler is not None and self.voice_to_speech is None:
-            download_whisper_model(self.whisper_size)
+            if show_model_download:
+                whisper.load_model(self.whisper_size)
+            else:
+                download_whisper_model(self.whisper_size)
 
     def listen(self):
         """
@@ -249,8 +259,6 @@ class Listener:
             self.has_voice = is_voice
 
         if self.speech_handler is not None and self.voice_to_speech is None:
-            import whisper
-
             model = whisper.load_model(self.whisper_size, self.device)
 
             def voice_to_speech(frames: List[np.ndarray]) -> str:
@@ -264,8 +272,8 @@ class Listener:
 
         self._stop.clear()
         self.stream.start()
-        if self.on_listenining_start is not None:
-            self.on_listenining_start()
+        if self.on_listening_start is not None:
+            self.on_listening_start()
 
     def _audio_cb(self, in_data: np.ndarray, *args):
         if self._stop.is_set():

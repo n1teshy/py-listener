@@ -3,7 +3,7 @@
 PyListener is tool for near real-time voice processing and speech to text conversion, it can be pretty
 fast to slightly sluggish depending on the compute and memory availability of the environment, I suggest
 using it in situations where a delay of ~1 second is reasonable, e.g. AI assistants, voice command
-processing etc. 
+processing etc.
 
 [![Watch a demo](https://img.youtube.com/vi/SEFm8rJRg_A/0.jpg)](https://www.youtube.com/watch?v=SEFm8rJRg_A)
 
@@ -69,6 +69,8 @@ It starts collecting audio data after instantation into `n` second chunks, `n` i
 - `use_fp16`: a boolean flag indicating if the the voice detection and speech-to-text models should use [half precision](https://en.wikipedia.org/wiki/Half-precision_floating-point_format) arithmetic to save memory and reduce latency, the default is `True` if CUDA is available, it has no effect on CPUs at the time of this writing so it's set to `False` by default on CPU environments.
 
 - `en_only`: a flag indicating only english language is going to be used in the collected audio, this is used to determine the best whisper model to use to convert speech to text.
+
+- `show_model_download`: a flag specifying if a progress bar should be displayed when downloading models.
 
 - `device`: this the device where the speech detection and speech to text conversion models run, the default is `cuda if available, else cpu`.
 
