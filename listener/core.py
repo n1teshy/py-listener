@@ -29,7 +29,7 @@ WhisperSize = Literal[
 def choose_whisper_model(
     device: torch.device, use_fp16: bool, en_only: bool
 ) -> WhisperSize:
-    if device.type.lower() in ("cpu", "mps"):
+    if device.type in ("cpu", "mps"):
         return "small.en" if en_only else "small"
     total = torch.cuda.get_device_properties(device).total_memory
     avlbl_gb = (total - torch.cuda.memory_allocated(device)) / (1024**3)
@@ -201,7 +201,7 @@ class Listener:
         else:
             device = torch.device(device) if type(device) is str else device
         if use_fp16 is None:
-            use_fp16 = device.type.lower() not in ("cpu", "mps")
+            use_fp16 = device.type not in ("cpu", "mps")
         self.speech_handler = speech_handler
         self.on_listening_start = on_listening_start
         self.sampling_rate = sampling_rate
@@ -220,7 +220,7 @@ class Listener:
         self.device = device
         self.voice_chunks = []
         self._stop = threading.Event()
-        self._free_cuda = False
+        self._free_mem = False
         # openai-whisper shows a progress bar when it downloads a model
         # I don't like the bar messing up my terminal, this is a temporary fix
         if self.speech_handler is not None and self.voice_to_speech is None:
@@ -268,7 +268,7 @@ class Listener:
                 return model.transcribe(audio, fp16=self.use_fp16)["text"]
 
             self.voice_to_speech = voice_to_speech
-            self._free_cuda = True
+            self._free_mem = True
 
         self._stop.clear()
         self.stream.start()
@@ -302,7 +302,8 @@ class Listener:
         self.voice_chunks = []
         # free the whisper model from the reference held by
         # self.voice_to_speech() so it can be grabage collected
-        if self._free_cuda:
+        if self._free_mem:
             del self.voice_to_speech
             self.voice_to_speech = None
-            torch.cuda.empty_cache()
+            if self.device.type.startswith("cuda"):
+                torch.cuda.empty_cache()
