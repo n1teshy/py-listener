@@ -1,0 +1,5 @@
+numpy
+pynvml
+onnxruntime
+sounddevice
+faster-whisper

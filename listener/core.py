@@ -1,16 +1,18 @@
-import hashlib
 import math
+import multiprocessing as mp
+import multiprocessing.shared_memory as shared_mem
 import os
+import queue
 import threading
-import urllib
-from typing import Any, Callable, List, Literal, Optional, Union
+import time
+from multiprocessing.synchronize import Event as EventClass
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 import numpy as np
+import pynvml
 import sounddevice as sd
-import torch
-import whisper
 
-from listener.utils import whisper_source
+from listener.vad import contains_speech
 
 WhisperSize = Literal[
     "tiny",
@@ -24,65 +26,111 @@ WhisperSize = Literal[
     "large",
     "turbo",
 ]
+ComputeType = Literal[
+    "int8",
+    "int8_float32",
+    "int8_float16",
+    "int8_bfloat16",
+    "int16",
+    "float16",
+    "bfloat16",
+    "float32",
+]
+
+
+def get_cuda_mem_gbs(device_idx: int):
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
+    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    pynvml.nvmlShutdown()
+    return mem.free / (1024**3)
 
 
 def choose_whisper_model(
-    device: torch.device, use_fp16: bool, en_only: bool
+    device: str, compute: str, en_only: bool
 ) -> WhisperSize:
-    if device.type in ("cpu", "mps"):
-        return "small.en" if en_only else "small"
-    total = torch.cuda.get_device_properties(device).total_memory
-    avlbl_gb = (total - torch.cuda.memory_allocated(device)) / (1024**3)
-    if use_fp16:
-        # assuming fp16 will reduce model's memory consumption
-        avlbl_gb = math.ceil(avlbl_gb)
-    if avlbl_gb >= 10:
-        size = "large"
-    elif avlbl_gb >= 6:
-        size = "turbo"
-    elif avlbl_gb >= 5:
-        size = "medium"
-    elif avlbl_gb >= 2:
-        size = "small"
+    if device.startswith("cuda"):
+        if device == "cuda":
+            device = "cuda:0"
+        avlbl_gbs = get_cuda_mem_gbs(int(device.split(":")[1]))
+        if compute != "float32":
+            avlbl_gbs = math.ceil(avlbl_gbs)
+        if avlbl_gbs >= 10:
+            size = "large"
+        elif avlbl_gbs >= 6:
+            size = "turbo"
+        elif avlbl_gbs >= 5:
+            size = "medium"
+        elif avlbl_gbs >= 2:
+            size = "small"
+        else:
+            size = "base"
     else:
-        size = "base"
+        size = "small" if compute.startswith(("int8", "int16")) else "base"
     if en_only and size not in ("large", "turbo"):
         size += ".en"
     return size
 
 
-def download_whisper_model(size: str):
-    url = whisper_source[size]
-    default = os.path.join(os.path.expanduser("~"), ".cache")
-    root = os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
-    os.makedirs(root, exist_ok=True)
+def run_transcriber(
+    model_name: str,
+    compute_type: Union[ComputeType, str],
+    device: str,
+    in_que: Union[mp.Queue, queue.Queue],
+    out_que: Union[mp.Queue, queue.Queue],
+    stop_evt: EventClass,
+    whisper_kwargs: Dict[str, Any],
+):
+    import faster_whisper
 
-    expected_sha256 = url.split("/")[-2]
-    model_file = os.path.join(root, os.path.basename(url))
+    kwargs = {"compute_type": compute_type, "device": device}
+    kwargs.update(whisper_kwargs)
+    model = faster_whisper.WhisperModel(model_name, **kwargs)
 
-    if os.path.exists(model_file) and not os.path.isfile(model_file):
-        raise RuntimeError(f"{model_file} exists and is not a regular file")
+    while not stop_evt.is_set():
+        try:
+            arg_tuple = in_que.get(timeout=1)
+            if len(arg_tuple) == 1:
+                audio = arg_tuple[0]
+                segments, _ = model.transcribe(
+                    audio=audio, beam_size=5, vad_filter=True
+                )
+                out_que.put(([seg.text for seg in segments],))
+                continue
 
-    if os.path.isfile(model_file):
-        with open(model_file, "rb") as f:
-            model_bytes = f.read()
-        if hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
-            return
+            shm_name, shape, dtype = arg_tuple
+            shm = shared_mem.SharedMemory(name=shm_name)
+            audio = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
+            segments, _ = model.transcribe(
+                audio=audio, beam_size=5, vad_filter=True
+            )
+            shm.close()
+            out_que.put((shm_name, [seg.text for seg in segments]))
+        except (KeyboardInterrupt, queue.Empty):
+            continue
 
-    with urllib.request.urlopen(url) as source, open(
-        model_file, "wb"
-    ) as output:
-        while True:
-            buffer = source.read(8192)
-            if not buffer:
-                break
-            output.write(buffer)
-    model_bytes = open(model_file, "rb").read()
-    if hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
-        raise RuntimeError(
-            "Model has been downloaded but the SHA256 checksum "
-            "does not not match. Please retry loading the model."
-        )
+
+def transcription_handler(
+    out_que: mp.Queue,
+    handler: Callable,
+    stop_evt: EventClass,
+    shared_mem_refs: Optional[Dict[str, shared_mem.SharedMemory]] = None,
+    shared_mem_lock: Optional[threading.Lock] = None,
+):
+    while not stop_evt.is_set():
+        try:
+            arg_tuple = out_que.get(timeout=1)
+            if len(arg_tuple) > 1:
+                shm_name, segments = arg_tuple
+                with shared_mem_lock:
+                    shared_mem_refs[shm_name].close()
+                    shared_mem_refs[shm_name].unlink()
+                    shared_mem_refs.pop(shm_name)
+            else:
+                segments = arg_tuple[0]
+            handler(segments)
+        except (KeyboardInterrupt, queue.Empty):
+            continue
 
 
 class Listener:
@@ -100,12 +148,13 @@ class Listener:
         on_speech_start: Optional[Callable] = None,
         has_voice: Optional[Callable[[np.ndarray], bool]] = None,
         voice_handler: Optional[Callable[[List[np.ndarray]], Any]] = None,
-        voice_to_speech: Optional[Callable[[List[np.ndarray]], Any]] = None,
+        min_speech_ms: int = 0,
+        speech_prob_thresh: float = 0.5,
         whisper_size: Union[WhisperSize, Literal["auto"]] = "auto",
-        use_fp16: Optional[bool] = None,
+        whisper_kwargs: Optional[Dict[str, Any]] = None,
+        compute_type: Optional[Union[ComputeType, str]] = None,
         en_only: bool = False,
-        show_model_download: bool = True,
-        device: Optional[Union[str, torch.device]] = None,
+        device: Optional[str] = None,
     ):
         """
         Collects audio data in `time_window` second chunks and when human
@@ -121,9 +170,9 @@ class Listener:
 
         Parameters
         ----------
-        speech_handler: Callable[[str], Any], optional
-            Function to be called with the text extracted from the audio with
-            human voice.
+        speech_handler: Callable[[List[str]], Any], optional
+            Function to be called with the text segments extracted from the
+            audio with human voice.
 
         on_listening_start: Callable, optional
             Function to call when `Listener` starts listening.
@@ -159,9 +208,11 @@ class Listener:
             Function to be called with the collected audio when speaker is
             done speaking.
 
-        voice_to_speech: Callable[[List[np.ndarray]], Any], optional
-            User defined function to convert collected audio with human voice
-            to text, a speech-to-text function.
+        min_speech_ms: Minimum number of milliseconds of human voice
+            that counts as speech (default: 0).
+
+        speech_prob_thresh: Speech probability less than this will not be
+            considered speech (default: 0.5).
 
         whisper_size: WhisperSize, optional
             Specifies size of the whisper model to be used for converting the
@@ -171,37 +222,54 @@ class Listener:
             are english-only and tend to perform better if the speaker only
             speaks english (default: `"auto"`).
 
-        use_fp16: bool, optional
-            Specifies if the whisper model should use half-precision (16 bit
-            floats) arithmetic instead of the typical single-precision (32 bit
-            floats), this reduces model's memory footprint and lowers latency
-            (default: False for CPU and True for GPU).
+        whisper_kwargs: dict, optional
+            Keyword arguments for the underlying `faster_whisper.WhisperModel`
+            object.
+
+        compute_type: str, optional
+            The data type to use for whisper model's computation
+            check https://opennmt.net/CTranslate2/quantization.html for all
+            available options.
 
         en_only: bool, optional
             This flag is used when choosing the optimal whisper model when the
             `whisper_size` argument is not provided, set to `True` if the
             speaker is only going to speak english (default: `False`).
 
-        show_model_download: bool, optional
-            This controls if a progress bar is displayed when dowloading the
-            necessary models (default: `True`).
-
-        device: Union[str, torch.device], optional
+        device: str, optional
             The device to run necessary models on, e.g. cpu, cuda etc
-            (default: `"cuda"` if available, `"cpu"` otherwise).
+            (default: `cuda` if available, `cpu` otherwise).
         """
 
         assert (voice_handler is None) != (
             speech_handler is None
         ), "pass either 'voice_handler' or 'speech_handler', only one"
+
+        assert (
+            0 < speech_prob_thresh <= 1
+        ), "speech_prob_thresh must be a value beween '0 < threshold <= 1'"
+
         if device is None:
-            device = torch.device(
-                "cuda" if torch.cuda.is_available() else "cpu"
+            try:
+                pynvml.nvmlInit()
+                has_cuda = pynvml.nvmlDeviceGetCount() > 0
+            except pynvml.NVMLError_LibraryNotFound:
+                has_cuda = False
+            if has_cuda:
+                pynvml.nvmlShutdown()
+            device = "cuda" if has_cuda else "cpu"
+
+        if compute_type is None:
+            compute_type = "float" + (
+                "16" if device.startswith("cuda") else "32"
             )
-        else:
-            device = torch.device(device) if type(device) is str else device
-        if use_fp16 is None:
-            use_fp16 = device.type not in ("cpu", "mps")
+
+        whisper_size = (
+            whisper_size
+            if whisper_size != "auto"
+            else choose_whisper_model(device, compute_type, en_only)
+        )
+
         self.speech_handler = speech_handler
         self.on_listening_start = on_listening_start
         self.sampling_rate = sampling_rate
@@ -210,74 +278,59 @@ class Listener:
         self.on_speech_start = on_speech_start
         self.has_voice = has_voice
         self.voice_handler = voice_handler
-        self.voice_to_speech = voice_to_speech
-        self.whisper_size = (
-            whisper_size
-            if whisper_size != "auto"
-            else choose_whisper_model(device, use_fp16, en_only)
-        )
-        self.use_fp16 = use_fp16
+        self.min_speech_ms = min_speech_ms
+        self.speech_prob_thresh = speech_prob_thresh
         self.device = device
+        self.has_cuda = device.startswith("cuda")
         self.voice_chunks = []
-        self._stop = threading.Event()
-        self._free_mem = False
-        # openai-whisper shows a progress bar when it downloads a model
-        # I don't like the bar messing up my terminal, this is a temporary fix
-        if self.speech_handler is not None and self.voice_to_speech is None:
-            if show_model_download:
-                whisper.load_model(self.whisper_size)
-            else:
-                download_whisper_model(self.whisper_size)
 
-    def listen(self):
-        """
-        Starts listening from a separate thread.
-        """
-        self.stream = sd.InputStream(
-            samplerate=self.sampling_rate,
-            blocksize=self.sampling_rate * self.time_window,
-            channels=self.no_channels,
-            callback=self._audio_cb,
-        )
-        if self.has_voice is None:
-            vad_model, utils = torch.hub.load(
-                repo_or_dir="snakers4/silero-vad",
-                model="silero_vad",
+        if speech_handler is not None:
+            self.que_in_transcriber = (
+                queue.Queue() if self.has_cuda else mp.Queue()
             )
-            vad_model = vad_model.to(self.device)
-            get_speech_timestamps = utils[0]
+            self.que_out_transcriber = (
+                queue.Queue() if self.has_cuda else mp.Queue()
+            )
+            self.evt_stop_transcriber = (
+                threading.Event() if self.has_cuda else mp.Event()
+            )
+            self.evt_stop_transcription_handler = (
+                threading.Event() if self.has_cuda else mp.Event()
+            )
+            self.shared_memory_refs = None if self.has_cuda else {}
+            self.shared_memory_lock = (
+                None if self.has_cuda else threading.Lock()
+            )
 
-            def is_voice(frames: np.ndarray):
-                frames = torch.tensor(
-                    frames, dtype=torch.float32, device=self.device
-                )
-                timestamps = get_speech_timestamps(
-                    frames, vad_model, sampling_rate=self.sampling_rate
-                )
-                return len(timestamps) > 0
-
-            self.has_voice = is_voice
-
-        if self.speech_handler is not None and self.voice_to_speech is None:
-            model = whisper.load_model(self.whisper_size, self.device)
-
-            def voice_to_speech(frames: List[np.ndarray]) -> str:
-                audio = torch.from_numpy(np.concatenate(frames)).to(
-                    model.device
-                )
-                return model.transcribe(audio, fp16=self.use_fp16)["text"]
-
-            self.voice_to_speech = voice_to_speech
-            self._free_mem = True
-
-        self._stop.clear()
-        self.stream.start()
-        if self.on_listening_start is not None:
-            self.on_listening_start()
+            transcriber_args = dict(
+                target=run_transcriber,
+                args=(
+                    whisper_size,
+                    compute_type,
+                    device,
+                    self.que_in_transcriber,
+                    self.que_out_transcriber,
+                    self.evt_stop_transcriber,
+                    whisper_kwargs if whisper_kwargs is not None else {},
+                ),
+            )
+            if self.has_cuda:
+                self.transcriber = threading.Thread(**transcriber_args)
+            else:
+                self.transcriber = mp.Process(**transcriber_args)
+            self.transcription_handler = threading.Thread(
+                target=transcription_handler,
+                args=(
+                    self.que_out_transcriber,
+                    self.speech_handler,
+                    self.evt_stop_transcription_handler,
+                    self.shared_memory_refs,
+                    self.shared_memory_lock,
+                ),
+            )
 
     def _audio_cb(self, in_data: np.ndarray, *args):
-        if self._stop.is_set():
-            self.stream.stop()
+        if self.evt_stop_transcription_handler.is_set():
             return
         frames = in_data.flatten()
         if self.has_voice(frames):
@@ -288,22 +341,84 @@ class Listener:
                 self.on_speech_start()
             self.voice_chunks.append(frames)
         elif len(self.voice_chunks) > 0:
-            if self.voice_handler is not None:
-                self.voice_handler(self.voice_chunks)
+            if self.speech_handler is not None:
+                frames = np.concatenate(self.voice_chunks)
+                if self.has_cuda or os.name != "nt":
+                    self.que_in_transcriber.put((frames.ravel(),))
+                else:
+                    shm = shared_mem.SharedMemory(
+                        create=True, size=frames.size * frames.itemsize
+                    )
+                    shared_arr = np.ndarray(
+                        shape=(frames.size,),
+                        dtype=frames.dtype,
+                        buffer=shm.buf,
+                    )
+                    shared_arr[:] = frames.ravel()
+                    self.que_in_transcriber.put(
+                        (shm.name, frames.shape, frames.dtype)
+                    )
+                    # this reference keeps the shared memory from
+                    # being garbage collected
+                    with self.shared_memory_lock:
+                        self.shared_memory_refs[shm.name] = shm
             else:
-                self.speech_handler(self.voice_to_speech(self.voice_chunks))
-            self.voice_chunks = []
+                self.voice_handler(self.voice_chunks)
+            self.voice_chunks.clear()
 
-    def stop(self):
-        """
-        Stops listening.
-        """
-        self._stop.set()
+    def reset(self):
         self.voice_chunks = []
-        # free the whisper model from the reference held by
-        # self.voice_to_speech() so it can be grabage collected
-        if self._free_mem:
-            del self.voice_to_speech
-            self.voice_to_speech = None
-            if self.device.type.startswith("cuda"):
-                torch.cuda.empty_cache()
+        if self.speech_handler is None:
+            return
+        self.evt_stop_transcriber.clear()
+        self.evt_stop_transcription_handler.clear()
+
+    def listen(self, block: bool = False):
+        """
+        Starts listening from a separate thread.
+        """
+        self.stream = sd.InputStream(
+            samplerate=self.sampling_rate,
+            blocksize=self.sampling_rate * self.time_window,
+            channels=self.no_channels,
+            callback=self._audio_cb,
+        )
+        if self.has_voice is None:
+
+            def has_voice(audio: np.ndarray):
+                return contains_speech(
+                    audio,
+                    sampling_rate=self.sampling_rate,
+                    min_speech_ms=self.min_speech_ms,
+                    speech_prob_thresh=self.speech_prob_thresh,
+                )
+
+            self.has_voice = has_voice
+
+        self.reset()
+        self.transcriber.start()
+        self.transcription_handler.start()
+        self.stream.start()
+        if self.on_listening_start is not None:
+            self.on_listening_start()
+        if not block:
+            return
+        while True:
+            time.sleep(1)
+
+    def close(self):
+        """
+        Stops listening and frees held resources.
+        """
+        if self.speech_handler is not None:
+            self.evt_stop_transcriber.set()
+            self.evt_stop_transcription_handler.set()
+            self.transcriber.join()
+            self.transcription_handler.join()
+            if self.shared_memory_refs is not None:
+                with self.shared_memory_lock:
+                    for name in self.shared_memory_refs.keys():
+                        self.shared_memory_refs[name].close()
+                        self.shared_memory_refs[name].unlink()
+                    self.shared_memory_refs.clear()
+        self.voice_chunks.clear()

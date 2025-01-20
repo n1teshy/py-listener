@@ -20,12 +20,13 @@ setup(
     url=GITHUB,
     packages=find_packages(),
     install_requires=[
-        "torch",
-        "torchaudio",
         "numpy",
+        "pynvml",
+        "onnxruntime",
         "sounddevice",
-        "openai-whisper",
+        "faster-whisper",
     ],
+    include_package_data=True,
     classifiers=[
         "Intended Audience :: Developers",
         "Programming Language :: Python",

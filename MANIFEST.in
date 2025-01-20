@@ -1,0 +1,4 @@
+include listener/assets/silero_encoder_v5.onnx
+include listener/assets/silero_decoder_v5.onnx
+include requirements.txt
+include requirements.dev.txt
