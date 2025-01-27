@@ -40,6 +40,6 @@ setup(
         "offline speech to text",
         "stt",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     license="MIT",
 )
