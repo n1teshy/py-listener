@@ -79,13 +79,25 @@ def run_transcriber(
     in_que: Union[mp.Queue, queue.Queue],
     out_que: Union[mp.Queue, queue.Queue],
     stop_evt: EventClass,
+    show_download: bool,
     whisper_kwargs: Dict[str, Any],
 ):
+    import sys
+
     import faster_whisper
 
     kwargs = {"compute_type": compute_type, "device": device}
     kwargs.update(whisper_kwargs)
-    model = faster_whisper.WhisperModel(model_name, **kwargs)
+    if not show_download:
+        try:
+            devnull = open(os.devnull, "w", encoding="utf-8")
+            sys.stdout, sys.stderr = devnull, devnull
+            model = faster_whisper.WhisperModel(model_name, **kwargs)
+        finally:
+            devnull.close()
+            sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+    else:
+        model = faster_whisper.WhisperModel(model_name, **kwargs)
 
     while not stop_evt.is_set():
         try:
@@ -155,6 +167,7 @@ class Listener:
         compute_type: Optional[Union[ComputeType, str]] = None,
         en_only: bool = False,
         device: Optional[str] = None,
+        show_download: bool = True,
     ):
         """
         Collects audio data in `time_window` second chunks and when human
@@ -239,6 +252,10 @@ class Listener:
         device: str, optional
             The device to run necessary models on, e.g. cpu, cuda etc
             (default: `cuda` if available, `cpu` otherwise).
+
+        show_download: bool, optional
+            Controls whether progress bars are shown while downloading the
+            whisper models (default: True).
         """
 
         assert (voice_handler is None) != (
@@ -311,6 +328,7 @@ class Listener:
                     self.que_in_transcriber,
                     self.que_out_transcriber,
                     self.evt_stop_transcriber,
+                    show_download,
                     whisper_kwargs if whisper_kwargs is not None else {},
                 ),
             )

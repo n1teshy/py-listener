@@ -71,12 +71,12 @@ f
 
 - `device`: this the device where the speech detection and speech to text conversion models run, the default is `cuda if available, else cpu`.
 
+- `show_download`: controls whether progress bars are shown while downloading the whisper models, default is `True`.
+
 ### Methods
 - **`listen`**: starts recording audio and
 - - if a `voice_handler` function is passed, calls the function with the accumulated human voice, `voice_handler(list[numpy.ndarray])`.
 - - else, it keeps recording human voice in `time_window` second chunks until a `time_window` second long silence is detected, at which point it converts the accumulated voice to text, and calls the given `speech_handler` function and passes this transcription to it as the only argument, the transcription is a list of text segments, `speech_handler(List[str])`.
-
-- - **NOTE: on systems where cuda is not available, the listener creates a child process to run the model so it doesn't block the main process, so it's necessary to call the `listen` method inside a main guard, i.e. `if __name__ == "__main__"` on CPU-only systems.**
 
 - **`close`**: stops recording audio and frees the resource held by the listener.
 
