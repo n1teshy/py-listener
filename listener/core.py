@@ -12,6 +12,7 @@ import numpy as np
 import pynvml
 import sounddevice as sd
 
+import listener.meta as meta
 from listener.vad import contains_speech
 
 WhisperSize = Literal[
@@ -335,7 +336,9 @@ class Listener:
             if self.has_cuda:
                 self.transcriber = threading.Thread(**transcriber_args)
             else:
-                self.transcriber = mp.Process(**transcriber_args)
+                self.transcriber = mp.Process(
+                    **transcriber_args, name=meta.name
+                )
             self.transcription_handler = threading.Thread(
                 target=transcription_handler,
                 args=(
@@ -395,6 +398,9 @@ class Listener:
         """
         Starts listening from a separate thread.
         """
+        if mp.current_process().name == meta.name:
+            return
+
         self.stream = sd.InputStream(
             samplerate=self.sampling_rate,
             blocksize=self.sampling_rate * self.time_window,
