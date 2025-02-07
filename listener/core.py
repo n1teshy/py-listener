@@ -300,6 +300,7 @@ class Listener:
         self.device = device
         self.has_cuda = device.startswith("cuda")
         self.voice_chunks = []
+        self.is_paused = False
 
         if speech_handler is not None:
             self.que_in_transcriber = (
@@ -348,8 +349,11 @@ class Listener:
             )
 
     def _audio_cb(self, in_data: np.ndarray, *args):
+        if self.is_paused:
+            return
         if self.evt_stop_transcription_handler.is_set():
             return
+
         frames = in_data.flatten()
         if self.has_voice(frames):
             if (
@@ -423,6 +427,18 @@ class Listener:
             return
         while True:
             time.sleep(1)
+
+    def pause(self):
+        """
+        Pauses listening until `resume` is called.
+        """
+        self.is_paused = True
+
+    def resume(self):
+        """
+        Resumes listening after `pause` is called.
+        """
+        self.is_paused = False
 
     def close(self):
         """

@@ -78,6 +78,10 @@ f
 - - if a `voice_handler` function is passed, calls the function with the accumulated human voice, `voice_handler(list[numpy.ndarray])`.
 - - else, it keeps recording human voice in `time_window` second chunks until a `time_window` second long silence is detected, at which point it converts the accumulated voice to text, and calls the given `speech_handler` function and passes this transcription to it as the only argument, the transcription is a list of text segments, `speech_handler(List[str])`.
 
+- **`pause`**: pauses listening without clearing up held resources.
+
+- **`resume`**: resumes listening if it was paused.
+
 - **`close`**: stops recording audio and frees the resource held by the listener.
 
 - - **NOTE: it is imperative to call the `close` method when the listener is no longer required, because on CPU-only systems, the audio is sent to the model running in the child process in shared memory objects and if the `close` method is not called, thos
