@@ -301,8 +301,9 @@ class Listener:
         self.has_cuda = device.startswith("cuda")
         self.voice_chunks = []
         self.is_paused = False
+        self.transcription_mode = speech_handler is not None
 
-        if speech_handler is not None:
+        if self.transcription_mode:
             self.que_in_transcriber = (
                 queue.Queue() if self.has_cuda else mp.Queue()
             )
@@ -348,10 +349,25 @@ class Listener:
                 ),
             )
 
+        if self.has_voice is None:
+
+            def has_voice(audio: np.ndarray):
+                return contains_speech(
+                    audio,
+                    sampling_rate=self.sampling_rate,
+                    min_speech_ms=self.min_speech_ms,
+                    speech_prob_thresh=self.speech_prob_thresh,
+                )
+
+            self.has_voice = has_voice
+
     def _audio_cb(self, in_data: np.ndarray, *args):
         if self.is_paused:
             return
-        if self.evt_stop_transcription_handler.is_set():
+        if (
+            self.transcription_mode
+            and self.evt_stop_transcription_handler.is_set()
+        ):
             return
 
         frames = in_data.flatten()
@@ -363,7 +379,7 @@ class Listener:
                 self.on_speech_start()
             self.voice_chunks.append(frames)
         elif len(self.voice_chunks) > 0:
-            if self.speech_handler is not None:
+            if self.transcription_mode:
                 frames = np.concatenate(self.voice_chunks)
                 if self.has_cuda or os.name != "nt":
                     self.que_in_transcriber.put((frames.ravel(),))
@@ -390,7 +406,7 @@ class Listener:
 
     def reset(self):
         self.voice_chunks = []
-        if self.speech_handler is None:
+        if not self.transcription_mode:
             return
         self.evt_stop_transcriber.clear()
         self.evt_stop_transcription_handler.clear()
@@ -405,21 +421,11 @@ class Listener:
             channels=self.no_channels,
             callback=self._audio_cb,
         )
-        if self.has_voice is None:
-
-            def has_voice(audio: np.ndarray):
-                return contains_speech(
-                    audio,
-                    sampling_rate=self.sampling_rate,
-                    min_speech_ms=self.min_speech_ms,
-                    speech_prob_thresh=self.speech_prob_thresh,
-                )
-
-            self.has_voice = has_voice
 
         self.reset()
-        self.transcriber.start()
-        self.transcription_handler.start()
+        if self.transcription_mode:
+            self.transcriber.start()
+            self.transcription_handler.start()
         self.stream.start()
         if self.on_listening_start is not None:
             self.on_listening_start()
@@ -444,7 +450,7 @@ class Listener:
         """
         Stops listening and frees held resources.
         """
-        if self.speech_handler is not None:
+        if self.transcription_mode:
             self.evt_stop_transcriber.set()
             self.evt_stop_transcription_handler.set()
             self.transcriber.join()
