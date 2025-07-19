@@ -36,6 +36,19 @@ ComputeType = Literal[
     "bfloat16",
     "float32",
 ]
+#languages supported by faster_whisper
+LANGUAGE_CODES = Literal[
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs",
+    "ca", "cs", "cy", "da", "de", "el", "en", "es", "et", "eu", "fa", "fi",
+    "fo", "fr", "gl", "gu", "he", "hi", "hr", "ht", "hu", "hy", "id", "is",
+    "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la", "lb", "ln", "lo",
+    "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne",
+    "nl", "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd",
+    "si", "sk", "sl", "sn", "so", "sq", "sr", "su", "sv", "sw", "ta", "te",
+    "tg", "th", "ti", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi", "wa",
+    "xh", "yi", "yo", "zh", "zu"
+]
+
 
 
 def get_cuda_mem_gbs(device_idx: int):
@@ -81,6 +94,7 @@ def run_transcriber(
     stop_evt: EventClass,
     show_download: bool,
     whisper_kwargs: Dict[str, Any],
+    language: LANGUAGE_CODES=None #so that it performs automatic detection
 ):
     import sys
 
@@ -105,7 +119,7 @@ def run_transcriber(
             if len(arg_tuple) == 1:
                 audio = arg_tuple[0]
                 segments, _ = model.transcribe(
-                    audio=audio, beam_size=5, vad_filter=True
+                    audio=audio, beam_size=5, vad_filter=True,language=language
                 )
                 out_que.put(([seg.text for seg in segments],))
                 continue
@@ -114,7 +128,7 @@ def run_transcriber(
             shm = shared_mem.SharedMemory(name=shm_name)
             audio = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
             segments, _ = model.transcribe(
-                audio=audio, beam_size=5, vad_filter=True
+                audio=audio, beam_size=5, vad_filter=True,language=language
             )
             shm.close()
             out_que.put((shm_name, [seg.text for seg in segments]))
@@ -168,6 +182,7 @@ class Listener:
         en_only: bool = False,
         device: Optional[str] = None,
         show_download: bool = True,
+        language: LANGUAGE_CODES=None, #so that it performs automatic detection
     ):
         """
         Collects audio data in `time_window` second chunks and when human
@@ -332,6 +347,7 @@ class Listener:
                     self.evt_stop_transcriber,
                     show_download,
                     whisper_kwargs if whisper_kwargs is not None else {},
+                    language,
                 ),
             )
             if self.has_cuda:
