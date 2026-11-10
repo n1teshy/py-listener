@@ -22,8 +22,7 @@ def contains_speech(
     min_speech_ms: int,
     speech_prob_thresh: float,
 ) -> bool:
-    """This method is used for splitting long audios into speech chunks using
-    silero VAD.
+    """Returns True if the audio chunk contains human voice.
 
     Parameters
     ----------
@@ -40,6 +39,7 @@ def contains_speech(
         audio, (0, window_size_samples - audio.shape[0] % window_size_samples)
     )
     speech_probs = model(padded_audio.reshape(1, -1)).reshape(-1)
+
     last_speech_idx, max_segment = None, 0
     for idx, prob in enumerate(speech_probs):
         if prob > speech_prob_thresh:
@@ -48,6 +48,10 @@ def contains_speech(
         elif last_speech_idx is not None:
             max_segment = max(idx - last_speech_idx, max_segment)
             last_speech_idx = None
+
+    if last_speech_idx is not None:
+        max_segment = max(len(speech_probs) - last_speech_idx, max_segment)
+
     max_speech_samples = max_segment * (audio.size / speech_probs.size)
     return int(max_speech_samples / sampling_rate * 1000) > min_speech_ms
 
@@ -104,25 +108,21 @@ class SileroVADModel:
         context = np.roll(context, 1, 1)
         batched_audio = np.concatenate([context, batched_audio], 2)
 
-        batched_audio = batched_audio.reshape(
-            -1, num_samples + context_size_samples
-        )
+        batched_audio = batched_audio.reshape(-1, num_samples + context_size_samples)
 
         encoder_batch_size = 10000
         num_segments = batched_audio.shape[0]
         encoder_outputs = []
         for i in range(0, num_segments, encoder_batch_size):
             encoder_output = self.encoder_session.run(
-                None, {"input": batched_audio[i: i + encoder_batch_size]}
+                None, {"input": batched_audio[i : i + encoder_batch_size]}
             )[0]
             encoder_outputs.append(encoder_output)
 
         encoder_output = np.concatenate(encoder_outputs, axis=0)
         encoder_output = encoder_output.reshape(batch_size, -1, 128)
         decoder_outputs = []
-        for window in np.split(
-            encoder_output, encoder_output.shape[1], axis=1
-        ):
+        for window in np.split(encoder_output, encoder_output.shape[1], axis=1):
             out, state = self.decoder_session.run(
                 None, {"input": window.squeeze(1), "state": state}
             )
